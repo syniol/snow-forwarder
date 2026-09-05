@@ -94,7 +94,7 @@ func (r *Record) ParseTime(input string) error {
 }
 
 // ParseHandler receives a payload from JSD
-func (r *Record) ParseHandler(w http.ResponseWriter, req *http.Request) {
+func ParseHandler(w http.ResponseWriter, req *http.Request) {
 
 	// read incoming request body
 	buf := new(bytes.Buffer)
@@ -105,6 +105,7 @@ func (r *Record) ParseHandler(w http.ResponseWriter, req *http.Request) {
 	}
 	input := buf.String()
 
+	var r Record
 	err = r.ParseRequest(input)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -114,6 +115,12 @@ func (r *Record) ParseHandler(w http.ResponseWriter, req *http.Request) {
 	err = r.ParseTime(input)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	err = record(&r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
