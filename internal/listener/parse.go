@@ -59,11 +59,6 @@ func (r *Record) ParseRequest(input string) error {
 // ParseTime gets timestamps from inbound request and formats them for SNOW
 func (r *Record) ParseTime(input string) error {
 
-	err := checkVars(input)
-	if err != nil {
-		return err
-	}
-
 	r.Ends = gjson.Get(input, os.Getenv("FINISH_TIME_FIELD")).Str
 	r.Starts = gjson.Get(input, os.Getenv("START_TIME_FIELD")).Str
 
@@ -93,14 +88,18 @@ func (r *Record) ParseTime(input string) error {
 	return nil
 }
 
-// ParseHandler receives a payload from JSD
-func ParseHandler(w http.ResponseWriter, req *http.Request) {
+// ParseHandler receives a payload from JSD and persists the change event.
+func (s *Server) ParseHandler(w http.ResponseWriter, req *http.Request) {
+
+	// limit incoming request body to 1 MiB
+	req.Body = http.MaxBytesReader(w, req.Body, 1<<20)
 
 	// read incoming request body
 	buf := new(bytes.Buffer)
 	_, err := buf.ReadFrom(req.Body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		log.Printf("listener: failed to read request body: %v", err)
+		http.Error(w, "invalid request payload", http.StatusBadRequest)
 		return
 	}
 	input := buf.String()
@@ -108,19 +107,27 @@ func ParseHandler(w http.ResponseWriter, req *http.Request) {
 	var r Record
 	err = r.ParseRequest(input)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		log.Printf("listener: failed to parse request: %v", err)
+		http.Error(w, "invalid request payload", http.StatusBadRequest)
 		return
 	}
 
 	err = r.ParseTime(input)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		log.Printf("listener: failed to parse time: %v", err)
+		http.Error(w, "invalid request payload", http.StatusBadRequest)
 		return
 	}
 
-	err = record(&r)
+	recordFunc := s.Record
+	if recordFunc == nil {
+		recordFunc = recorder
+	}
+
+	err = recordFunc(&r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("listener: failed to persist record: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 

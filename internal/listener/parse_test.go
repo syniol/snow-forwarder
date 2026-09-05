@@ -54,7 +54,7 @@ func TestParseHandler(t *testing.T) {
 		ends         string
 		recordErr    error
 		expectedCode int
-		err          string
+		errResp      string
 	}{
 		{
 			name:         "good",
@@ -71,20 +71,20 @@ func TestParseHandler(t *testing.T) {
 			name:         "missing",
 			input:        1,
 			expectedCode: http.StatusBadRequest,
-			err:          "missing value in payload",
+			errResp:      "invalid request payload",
 		},
 		{
 			name:         "time",
 			input:        2,
 			expectedCode: http.StatusBadRequest,
-			err:          "cannot parse",
+			errResp:      "invalid request payload",
 		},
 		{
 			name:         "recorder error",
 			input:        0,
 			recordErr:    errors.New("dynamo write failed"),
 			expectedCode: http.StatusInternalServerError,
-			err:          "dynamo write failed",
+			errResp:      "internal server error",
 		},
 	}
 
@@ -96,16 +96,14 @@ func TestParseHandler(t *testing.T) {
 			var recorded *Record
 			recordCalls := 0
 
-			origRecord := record
-			record = func(r *Record) error {
-				recordCalls++
-				recCopy := *r
-				recorded = &recCopy
-				return tc.recordErr
+			srv := &Server{
+				Record: func(r *Record) error {
+					recordCalls++
+					recCopy := *r
+					recorded = &recCopy
+					return tc.recordErr
+				},
 			}
-			t.Cleanup(func() {
-				record = origRecord
-			})
 
 			// create inbound payload
 			m, err := getMsg(tc.input)
@@ -129,8 +127,7 @@ func TestParseHandler(t *testing.T) {
 			// create response recorder
 			rr := httptest.NewRecorder()
 
-			handler := Handler()
-			handler.ServeHTTP(rr, r)
+			srv.ParseHandler(rr, r)
 
 			res := rr.Result()
 			defer res.Body.Close()
@@ -144,7 +141,7 @@ func TestParseHandler(t *testing.T) {
 				t.Errorf("expected status %v, got %v", tc.expectedCode, res.StatusCode)
 			}
 
-			if tc.err == "" {
+			if tc.errResp == "" {
 				if recordCalls != 1 {
 					t.Errorf("expected recorder to be called once, got %d calls", recordCalls)
 				}
@@ -173,11 +170,44 @@ func TestParseHandler(t *testing.T) {
 				if tc.recordErr == nil && recordCalls != 0 {
 					t.Errorf("expected recorder not to be called on parser error, got %d calls", recordCalls)
 				}
-				if msg := string(bytes.TrimSpace(b)); !strings.Contains(msg, tc.err) {
-					t.Errorf("expected error %q, got: %q", tc.err, msg)
+				if msg := string(bytes.TrimSpace(b)); !strings.Contains(msg, tc.errResp) {
+					t.Errorf("expected sanitized error %q, got: %q", tc.errResp, msg)
 				}
 			}
 		})
+	}
+}
+
+func TestParseHandler_PayloadSizeLimit(t *testing.T) {
+	setEnv()
+
+	recordCalls := 0
+	srv := &Server{
+		Record: func(r *Record) error {
+			recordCalls++
+			return nil
+		},
+	}
+
+	// Create payload larger than 1 MiB
+	largeData := bytes.Repeat([]byte("a"), (1<<20)+1024)
+	r, err := http.NewRequest("POST", "/", bytes.NewReader(largeData))
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	srv.ParseHandler(rr, r)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for oversized payload, got %d", rr.Code)
+	}
+	if recordCalls != 0 {
+		t.Errorf("expected recorder not to be called on oversized payload, got %d calls", recordCalls)
+	}
+	body := strings.TrimSpace(rr.Body.String())
+	if !strings.Contains(body, "invalid request payload") {
+		t.Errorf("expected sanitized error message, got %q", body)
 	}
 }
 
@@ -185,17 +215,13 @@ func TestParseHandler_RequestIsolation(t *testing.T) {
 	setEnv()
 
 	var recordedRecords []*Record
-	origRecord := record
-	record = func(r *Record) error {
-		recCopy := *r
-		recordedRecords = append(recordedRecords, &recCopy)
-		return nil
+	srv := &Server{
+		Record: func(r *Record) error {
+			recCopy := *r
+			recordedRecords = append(recordedRecords, &recCopy)
+			return nil
+		},
 	}
-	defer func() {
-		record = origRecord
-	}()
-
-	handler := Handler()
 
 	// 1. Send good request (case 0)
 	m0, err := getMsg(0)
@@ -204,7 +230,7 @@ func TestParseHandler_RequestIsolation(t *testing.T) {
 	}
 	r0, _ := http.NewRequest("POST", "/", strings.NewReader(m0))
 	w0 := httptest.NewRecorder()
-	handler.ServeHTTP(w0, r0)
+	srv.ParseHandler(w0, r0)
 	if w0.Code != http.StatusOK {
 		t.Fatalf("request 1 expected status 200, got %d", w0.Code)
 	}
@@ -222,7 +248,7 @@ func TestParseHandler_RequestIsolation(t *testing.T) {
 	}
 	r1, _ := http.NewRequest("POST", "/", strings.NewReader(m1))
 	w1 := httptest.NewRecorder()
-	handler.ServeHTTP(w1, r1)
+	srv.ParseHandler(w1, r1)
 	if w1.Code != http.StatusBadRequest {
 		t.Fatalf("request 2 expected status 400, got %d", w1.Code)
 	}
@@ -247,7 +273,7 @@ func TestParseHandler_RequestIsolation(t *testing.T) {
 	}`
 	r2, _ := http.NewRequest("POST", "/", strings.NewReader(customPayload))
 	w2 := httptest.NewRecorder()
-	handler.ServeHTTP(w2, r2)
+	srv.ParseHandler(w2, r2)
 	if w2.Code != http.StatusOK {
 		t.Fatalf("request 3 expected status 200, got %d", w2.Code)
 	}
@@ -264,3 +290,19 @@ func TestParseHandler_RequestIsolation(t *testing.T) {
 		t.Errorf("expected isolated summary, got %v", recordedRecords[1].Title)
 	}
 }
+
+func TestNewServerAndHandler(t *testing.T) {
+	s := NewServer()
+	if s == nil {
+		t.Fatal("expected NewServer to return non-nil Server")
+	}
+	if s.Record == nil {
+		t.Error("expected NewServer to initialize default Record function")
+	}
+
+	h := Handler()
+	if h == nil {
+		t.Fatal("expected Handler to return non-nil http.Handler")
+	}
+}
+
