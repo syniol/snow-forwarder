@@ -101,17 +101,20 @@ func (r *Record) ParseHandler(w http.ResponseWriter, req *http.Request) {
 	_, err := buf.ReadFrom(req.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	input := buf.String()
 
 	err = r.ParseRequest(input)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	err = r.ParseTime(input)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
